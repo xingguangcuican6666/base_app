@@ -1,31 +1,37 @@
 #include <jni.h>
-#include <pwd.h>
+#include <string.h>
+#include <sys/syscall.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <android/log.h>
 
-#define LOG_TAG "HMA_Stability_Test"
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
+struct linux_dirent64 {
+    unsigned long long d_ino;
+    long long          d_off;
+    unsigned short     d_reclen;
+    unsigned char      d_type;
+    char               d_name[];
+};
 
 JNIEXPORT void JNICALL
-Java_com_example_baseapp_MainActivity_verifyHmaFix(JNIEnv *env, jobject thiz) {
-    const char* target_pkg = "com.termux";
+Java_com_example_baseapp_MainActivity_rawDirectoryScan(JNIEnv *env, jobject thiz) {
+    // 直接打开 /data/data 目录
+    int fd = open("/data/data", O_RDONLY | O_DIRECTORY);
+    if (fd < 0) return;
 
-    // 1. 验证 getpwnam (测试 HMA 对 Identity 的拦截)
-    struct passwd *pw = getpwnam(target_pkg);
-    if (pw == NULL) {
-        // 正常情况：HMA 拦截了查询
-    } else {
-        LOGW("[CRITICAL] 逻辑漏洞：成功获取了 UID %d，HMA 拦截可能已被绕过！", pw->pw_uid);
+    char buf[8192];
+    int nread;
+
+    // 使用 getdents64 系统调用 (编号 61) 绕过所有 libc 层的 readdir Hook
+    while ((nread = syscall(SYS_getdents64, fd, buf, sizeof(buf))) > 0) {
+        for (int bpos = 0; bpos < nread; ) {
+            struct linux_dirent64 *d = (struct linux_dirent64 *) (buf + bpos);
+            if (strstr(d->d_name, "termux")) {
+                __android_log_print(ANDROID_LOG_ERROR, "HMA_TERMINATOR", 
+                    "!!! NATIVE BREAKTHROUGH !!! 系统调用发现目标: %s", d->d_name);
+            }
+            bpos += d->d_reclen;
+        }
     }
-
-    // 2. 验证路径 (测试 PMS 钩子是否因并发异常而失效)
-    if (access("/data/data/com.termux", F_OK) == 0) {
-        LOGW("[CRITICAL] 路径暴露：发现 Termux 目录，PMS 钩子可能已卸载 (unload)！");
-    }
-}
-
-// 保留原有的 stringFromJNI 方便 UI 显示
-JNIEXPORT jstring JNICALL
-Java_com_example_baseapp_MainActivity_stringFromJNI(JNIEnv *env, jobject thiz) {
-    return (*env)->NewStringUTF(env, "审计进行中，请观察 Logcat 输出");
+    close(fd);
 }

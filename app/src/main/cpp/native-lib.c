@@ -1,61 +1,104 @@
 #include <jni.h>
 #include <string.h>
+#include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/syscall.h>
 #include <android/log.h>
 
-#define LOG_TAG "HMA_Syscall_Audit"
+#define LOG_TAG "HMA_Nuclear_Audit"
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 
-/**
- * 使用 ARM64 内联汇编直接触发 faccessat 系统调用
- * syscall number: 48 (faccessat)
- * 参数: dirfd, pathname, mode, flags
- */
-long raw_faccessat(int dirfd, const char *pathname, int mode, int flags) {
-    long ret;
-    register int r0 __asm__("w0") = dirfd;
-    register const char *r1 __asm__("x1") = pathname;
-    register int r2 __asm__("w2") = mode;
-    register int r3 __asm__("w3") = flags;
-    register int r8 __asm__("x8") = 48; // faccessat 的系统调用号
+// 定义常用的 ARM64 系统调用号 (避免头文件定义冲突)
+#define __NR_raw_faccessat 48
+#define AT_FDCWD -100
 
+/**
+ * 原始系统调用实现 (仅限 ARM64)
+ * 使用内联汇编绕过 libc.so 的所有 Hook
+ */
+long perform_raw_syscall_access(const char *pathname) {
+#if defined(__aarch64__)
+    long ret;
+    // 参数说明: dirfd (AT_FDCWD), pathname, mode (F_OK), flags (0)
+    // 寄存器使用: x0-x3 传参, x8 存放调用号, svc #0 触发中断
     __asm__ __volatile__ (
-        "svc #0"
-        : "=r"(r0)
-        : "r"(r0), "r"(r1), "r"(r2), "r"(r3), "r"(r8)
-        : "memory"
+        "mov x0, %1\n"
+        "mov x1, %2\n"
+        "mov x2, %3\n"
+        "mov x3, #0\n"
+        "mov x8, %4\n"
+        "svc #0\n"
+        "mov %0, x0\n"
+        : "=r"(ret)
+        : "r"((long)AT_FDCWD), "r"(pathname), "r"((long)F_OK), "r"((long)__NR_raw_faccessat)
+        : "x0", "x1", "x2", "x3", "x8", "memory"
     );
-    ret = r0;
     return ret;
+#else
+    return -999; // 非 ARM64 环境返回标识
+#endif
 }
 
-void perform_syscall_contrast_audit(const char* target_path) {
-    // 1. 标准 libc 调用 (极可能被 HMA Hook)
-    int libc_res = access(target_path, F_OK);
+/**
+ * 核心审计函数：对比 Libc 与 Syscall 的结果
+ */
+void do_contrast_audit(const char* pkg_name) {
+    char path[128];
+    snprintf(path, sizeof(path), "/data/data/%s", pkg_name);
+
+    // 1. 标准 Libc 调用 (HMA 的主场)
+    // 此时 errno 会被更新
+    int libc_res = access(path, F_OK);
     int libc_err = errno;
 
-    // 2. 原始系统调用 (绕过 libc Hook)
-    // AT_FDCWD 表示相对当前工作目录，或者使用绝对路径
-    long syscall_res = raw_faccessat(-100, target_path, F_OK, 0);
+    // 2. Raw Syscall 调用 (内核的真理)
+    // 返回值直接就是结果或错误码 (负数表示错误)
+    long syscall_res = perform_raw_syscall_access(path);
 
-    LOGW("--- Contrast Audit for: %s ---", target_path);
-    LOGW("[Libc Result]: %d (errno: %d)", libc_res, libc_err);
-    LOGW("[Syscall Result]: %ld", syscall_res);
+    LOGW("--------------------------------------------");
+    LOGW("[Audit Target]: %s", path);
+    LOGW("[Standard Libc]: res=%d, errno=%d (%s)", libc_res, libc_err, strerror(libc_err));
+    LOGW("[Raw Syscall  ]: res=%ld", syscall_res);
 
-    // 逻辑矛盾判定
+    // --- 逻辑判断逻辑 ---
+    
+    // 情况 A: Libc 说不存在 (-1), 但内核 Syscall 说存在 (0)
     if (libc_res != 0 && syscall_res == 0) {
-        LOGW("[!!!] HMA DETECTED: Libc was lied to, but Kernel knows the truth!");
-    } else if (libc_res == 0 && syscall_res == 0) {
-        LOGW("[Status] App is visible to both (HMA not active for this path).");
-    } else {
-        LOGW("[Status] Both agree it's gone (Target likely not installed).");
+        LOGW("[!!!] EVIDENCE FOUND: HMA is spoofing this process! Libc is hooked.");
+    } 
+    // 情况 B: 两者都返回错误，但错误码不一致
+    // 注意：Syscall 返回的是负的 errno (如 -2 表示 ENOENT)
+    else if (libc_res != 0 && syscall_res != (long)libc_res) {
+        if (syscall_res == -13) { // EACCES
+            LOGW("[!!!] TRAP: Kernel returned EACCES (13), but Libc returned ENOENT (2). HMA detected.");
+        }
+    }
+    // 情况 C: 全部一致
+    else {
+        LOGW("[Status]: No inconsistency detected for this path.");
     }
 }
 
+/**
+ * JNI_OnLoad: SO 加载时自动触发审计
+ */
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    // 探测 Termux (即使它被隐藏)
-    perform_syscall_contrast_audit("/data/data/com.termux");
+    LOGW("=== STARTING FULL RAW SYSCALL AUDIT ===");
+
+    // 审计目标：Termux 和 HMA 自身
+    do_contrast_audit("com.termux");
+    do_contrast_audit("org.frknkrc44.hma_oss");
+
+    LOGW("=== AUDIT COMPLETED ===");
     return JNI_VERSION_1_6;
+}
+
+/**
+ * 修复后的 stringFromJNI
+ */
+JNIEXPORT jstring JNICALL
+Java_com_example_baseapp_MainActivity_stringFromJNI(JNIEnv *env, jobject thiz) {
+    return (*env)->NewStringUTF(env, "Check Logcat for 'HMA_Nuclear_Audit:W'");
 }

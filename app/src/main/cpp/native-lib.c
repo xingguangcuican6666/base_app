@@ -1,36 +1,31 @@
 #include <jni.h>
 #include <pwd.h>
-#include <string.h>
+#include <unistd.h>
 #include <android/log.h>
 
-#define LOG_TAG "HMA_Fix_Verify"
+#define LOG_TAG "HMA_Stability_Test"
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 
-/**
- * 验证 getpwnam 在高压和匿名上下文下的表现
- */
 JNIEXPORT void JNICALL
 Java_com_example_baseapp_MainActivity_verifyHmaFix(JNIEnv *env, jobject thiz) {
-    const char* target = "com.termux";
-    
-    LOGW("=== 执行 HMA 修复验证 ===");
+    const char* target_pkg = "com.termux";
 
-    // 1. 验证身份识别逻辑 (针对漏洞 1)
-    // 即使在 Native 层直接调用，UID 也是确定的。
-    // 如果你修复了 ActivityStarter 的 UID 校验，系统启动拦截将无懈可击。
-    struct passwd *pw = getpwnam(target);
-    
+    // 1. 验证 getpwnam (测试 HMA 对 Identity 的拦截)
+    struct passwd *pw = getpwnam(target_pkg);
     if (pw == NULL) {
-        LOGW("[PASS] getpwnam 返回 NULL。身份过滤依然生效，HMA 成功识别了调用者 UID。");
+        // 正常情况：HMA 拦截了查询
     } else {
-        LOGW("[FAIL] 逻辑泄露！能查到 UID: %d。说明 HMA 在当前上下文中未能正确拦截。", pw->pw_uid);
+        LOGW("[CRITICAL] 逻辑漏洞：成功获取了 UID %d，HMA 拦截可能已被绕过！", pw->pw_uid);
     }
 
-    // 2. 模拟并发后的状态
-    // 如果 uidHideCache 崩溃导致 Hook 卸载，这里的 access 就会成功
-    if (access("/data/data/com.termux", 0) == 0) {
-        LOGW("[FAIL] 文件路径暴露！Hook 框架可能已因并发异常而卸载 (unload)。");
-    } else {
-        LOGW("[PASS] 路径依然隐藏。uidHideCache 并发修复表现稳定。");
+    // 2. 验证路径 (测试 PMS 钩子是否因并发异常而失效)
+    if (access("/data/data/com.termux", F_OK) == 0) {
+        LOGW("[CRITICAL] 路径暴露：发现 Termux 目录，PMS 钩子可能已卸载 (unload)！");
     }
+}
+
+// 保留原有的 stringFromJNI 方便 UI 显示
+JNIEXPORT jstring JNICALL
+Java_com_example_baseapp_MainActivity_stringFromJNI(JNIEnv *env, jobject thiz) {
+    return (*env)->NewStringUTF(env, "审计进行中，请观察 Logcat 输出");
 }

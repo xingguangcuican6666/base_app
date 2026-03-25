@@ -1,56 +1,48 @@
-#include <jni.h>
-#include <string.h>
-#include <stdio.h>
-#include <dirent.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <errno.h>
 #include <android/log.h>
 
-#define LOG_TAG "Baseline_Audit"
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
+void audit_abstract_sockets() {
+    LOGW("=== STARTING FIXED ABSTRACT SOCKET SCAN ===");
+    
+    // 这里的名字不要带 @，代码会手动处理首字节
+    const char* targets[] = {
+        "termux.auth",
+        "termux-tasker",
+        "com.termux.am.socket"
+    };
 
-void audit_proc_pid_uids() {
-    LOGW("=== STARTING KERNEL PID SCAN ===");
-    DIR* dir = opendir("/proc");
-    if (!dir) return;
+    for (int i = 0; i < 3; i++) {
+        int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (sock < 0) continue;
 
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != NULL) {
-        // 过滤非数字目录 (只看 PID)
-        if (entry->d_name[0] < '0' || entry->d_name[0] > '9') continue;
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
 
-        char path[64];
-        struct stat st;
-        snprintf(path, sizeof(path), "/proc/%s", entry->d_name);
+        // 核心修正：
+        // 1. sun_path[0] 已经是 \0 (因为 memset)
+        // 2. 将名字复制到 sun_path[1] 开始的位置
+        size_t name_len = strlen(targets[i]);
+        if (name_len > sizeof(addr.sun_path) - 2) name_len = sizeof(addr.sun_path) - 2;
+        memcpy(addr.sun_path + 1, targets[i], name_len);
 
-        // 获取目录的 stat 信息
-        if (stat(path, &st) == 0) {
-            // Android 应用 UID 通常在 10000 以上
-            if (st.st_uid >= 10000 && st.st_uid <= 19999) {
-                // 尝试读取进程名 (cmdline)
-                char cmd_path[64];
-                char cmdline[128] = {0};
-                snprintf(cmd_path, sizeof(cmd_path), "/proc/%s/cmdline", entry->d_name);
-                
-                FILE* f = fopen(cmd_path, "r");
-                if (f) {
-                    fgets(cmdline, sizeof(cmdline), f);
-                    fclose(f);
-                }
+        // 3. 计算准确的地址长度：sun_family 的大小 + 1 (null byte) + 名字长度
+        // 不要使用 sizeof(addr)，那是固定长度，会导致内核读取多余的垃圾数据
+        socklen_t addr_len = offsetof(struct sockaddr_un, sun_path) + 1 + name_len;
 
-                // 如果能读到 cmdline 或者我们关心的 UID
-                // 即使 cmdline 为空（被系统屏蔽），UID 依然是硬指纹
-                if (strlen(cmdline) > 0) {
-                    LOGW("[Found Proc] PID: %s, UID: %d, Cmd: %s", entry->d_name, st.st_uid, cmdline);
-                }
+        if (connect(sock, (struct sockaddr*)&addr, addr_len) == 0) {
+            LOGW("[MATCH] Found Active Socket: @%s", targets[i]);
+        } else {
+            // ECONNREFUSED (111) 表示存在监听但拒绝，EACCES (13) 表示被 SELinux 拦截
+            if (errno == ECONNREFUSED) {
+                LOGW("[MATCH] Detected Occupied Socket: @%s (Refused)", targets[i]);
+            } else if (errno == EACCES) {
+                LOGW("[INFO] Socket @%s is blocked by SELinux", targets[i]);
             }
         }
+        close(sock);
     }
-    closedir(dir);
-    LOGW("=== KERNEL PID SCAN FINISHED ===");
-}
-
-JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    audit_proc_pid_uids();
-    return JNI_VERSION_1_6;
+    LOGW("=== SOCKET SCAN FINISHED ===");
 }

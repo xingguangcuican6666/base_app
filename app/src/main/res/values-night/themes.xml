@@ -1,0 +1,4 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Override for night mode -->
+    <style name="Theme.BaseApp" parent="Theme.MaterialComponents.DayNight.DarkActionBar" />
+</resources>

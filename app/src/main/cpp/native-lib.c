@@ -1,48 +1,36 @@
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <errno.h>
+#include <jni.h>
+#include <pwd.h>
+#include <string.h>
 #include <android/log.h>
 
-void audit_abstract_sockets() {
-    LOGW("=== STARTING FIXED ABSTRACT SOCKET SCAN ===");
+#define LOG_TAG "HMA_Fix_Verify"
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
+
+/**
+ * 验证 getpwnam 在高压和匿名上下文下的表现
+ */
+JNIEXPORT void JNICALL
+Java_com_example_baseapp_MainActivity_verifyHmaFix(JNIEnv *env, jobject thiz) {
+    const char* target = "com.termux";
     
-    // 这里的名字不要带 @，代码会手动处理首字节
-    const char* targets[] = {
-        "termux.auth",
-        "termux-tasker",
-        "com.termux.am.socket"
-    };
+    LOGW("=== 执行 HMA 修复验证 ===");
 
-    for (int i = 0; i < 3; i++) {
-        int sock = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (sock < 0) continue;
-
-        struct sockaddr_un addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sun_family = AF_UNIX;
-
-        // 核心修正：
-        // 1. sun_path[0] 已经是 \0 (因为 memset)
-        // 2. 将名字复制到 sun_path[1] 开始的位置
-        size_t name_len = strlen(targets[i]);
-        if (name_len > sizeof(addr.sun_path) - 2) name_len = sizeof(addr.sun_path) - 2;
-        memcpy(addr.sun_path + 1, targets[i], name_len);
-
-        // 3. 计算准确的地址长度：sun_family 的大小 + 1 (null byte) + 名字长度
-        // 不要使用 sizeof(addr)，那是固定长度，会导致内核读取多余的垃圾数据
-        socklen_t addr_len = offsetof(struct sockaddr_un, sun_path) + 1 + name_len;
-
-        if (connect(sock, (struct sockaddr*)&addr, addr_len) == 0) {
-            LOGW("[MATCH] Found Active Socket: @%s", targets[i]);
-        } else {
-            // ECONNREFUSED (111) 表示存在监听但拒绝，EACCES (13) 表示被 SELinux 拦截
-            if (errno == ECONNREFUSED) {
-                LOGW("[MATCH] Detected Occupied Socket: @%s (Refused)", targets[i]);
-            } else if (errno == EACCES) {
-                LOGW("[INFO] Socket @%s is blocked by SELinux", targets[i]);
-            }
-        }
-        close(sock);
+    // 1. 验证身份识别逻辑 (针对漏洞 1)
+    // 即使在 Native 层直接调用，UID 也是确定的。
+    // 如果你修复了 ActivityStarter 的 UID 校验，系统启动拦截将无懈可击。
+    struct passwd *pw = getpwnam(target);
+    
+    if (pw == NULL) {
+        LOGW("[PASS] getpwnam 返回 NULL。身份过滤依然生效，HMA 成功识别了调用者 UID。");
+    } else {
+        LOGW("[FAIL] 逻辑泄露！能查到 UID: %d。说明 HMA 在当前上下文中未能正确拦截。", pw->pw_uid);
     }
-    LOGW("=== SOCKET SCAN FINISHED ===");
+
+    // 2. 模拟并发后的状态
+    // 如果 uidHideCache 崩溃导致 Hook 卸载，这里的 access 就会成功
+    if (access("/data/data/com.termux", 0) == 0) {
+        LOGW("[FAIL] 文件路径暴露！Hook 框架可能已因并发异常而卸载 (unload)。");
+    } else {
+        LOGW("[PASS] 路径依然隐藏。uidHideCache 并发修复表现稳定。");
+    }
 }

@@ -2,26 +2,22 @@ package com.example.baseapp;
 
 import androidx.appcompat.app.AppCompatActivity;
 import android.os.Bundle;
-import android.util.Log;
 
 public class MainActivity extends AppCompatActivity {
-
-    private static final String TAG = "HMA_Probe";
 
     static {
         System.loadLibrary("native-lib");
     }
 
-    // JNI 接口：返回探测报告字符串
-    public native String nativeInit();
+    // JNI 接口：执行深度扫描并通过 Logcat 输出报告
+    public native void runFullReport();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        // 软件启动时执行探测并记录结果
-        String report = nativeInit();
-        Log.d(TAG, report);
+        // 软件启动时执行深度扫描
+        runFullReport();
     }
 }

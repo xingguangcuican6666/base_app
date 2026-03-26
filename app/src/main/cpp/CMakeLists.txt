@@ -15,8 +15,9 @@ find_library(
         log
 )
 
-# 链接 Android 日志库
+# 链接 Android 日志库和数学库
 target_link_libraries(
         native-lib
         ${log-lib}
+        m
 )

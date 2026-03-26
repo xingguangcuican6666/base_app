@@ -9,15 +9,15 @@ public class MainActivity extends AppCompatActivity {
         System.loadLibrary("native-lib");
     }
 
-    // JNI 接口：执行深度扫描并通过 Logcat 输出报告
-    public native void runFullReport();
+    // JNI 接口：并发竞争压力测试，判定目标包是否被本地 Hook 隐藏
+    public native void runStressTest(String targetPkg);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        // 软件启动时执行深度扫描
-        runFullReport();
+        // 软件启动时对目标包执行压力测试
+        runStressTest("com.topjohnwu.magisk");
     }
 }

@@ -1,6 +1,6 @@
 #include <jni.h>
-#include <unistd.h>
-#include <fcntl.h>
+#include <sys/stat.h> // 必须包含这个头文件
+#include <fcntl.h>    // 包含 AT_FDCWD
 #include <errno.h>
 #include <string.h>
 #include <android/log.h>
@@ -8,40 +8,41 @@
 #define LOG_TAG "RootProbe"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
-// 核心探测函数：区分“权限拒绝”和“路径不存在”
-int probe_path(const char* path) {
-    if (faccessat(AT_FDCWD, path, F_OK, AT_SYMLINK_NOFOLLOW) == 0) {
-        return 0; // 居然能访问（通常由于权限位 0700，普通应用会失败）
+// 使用 fstatat 代替 faccessat，兼容性更好
+int probe_path_v2(const char* path) {
+    struct stat st;
+    // AT_FDCWD 表示相对于当前工作目录（由于是绝对路径，会直接解析）
+    // AT_SYMLINK_NOFOLLOW 防止符号链接误导
+    if (fstatat(AT_FDCWD, path, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+        return 0; // 存在且可读属性（通常应用层会报 13）
     }
-    return errno; // 返回具体的错误码：EACCES (13) 或 ENOENT (2)
+    return errno; // 我们要的就是这个 errno
 }
 
 JNIEXPORT void JNICALL
 Java_com_example_baseapp_MainActivity_nativeInit(JNIEnv *env, jobject thiz) {
     
-    // 1. 基准测试：系统自带的目录
-    int err_adb = probe_path("/data/adb");
-    
-    // 2. 目标测试：Magisk/KernelSU 特有的子目录
-    int err_modules = probe_path("/data/adb/modules");
-    int err_ksu = probe_path("/data/adb/ksu");
+    int err_adb = probe_path_v2("/data/adb");
+    int err_modules = probe_path_v2("/data/adb/modules");
+    int err_ksu = probe_path_v2("/data/adb/ksu");
 
-    LOGD("--- 环境分析开始 ---");
+    LOGD("--- 环境分析开始 (V2) ---");
     LOGD("基准路径 [/data/adb]: errno = %d (%s)", err_adb, strerror(err_adb));
     LOGD("探测路径 [/data/adb/modules]: errno = %d (%s)", err_modules, strerror(err_modules));
     LOGD("探测路径 [/data/adb/ksu]: errno = %d (%s)", err_ksu, strerror(err_ksu));
 
-    // 3. 逻辑判定
-    if (err_adb == EACCES) {
-        if (err_modules == EACCES || err_ksu == EACCES) {
+    // 逻辑判定：
+    // 即使是 700 权限且 SELinux 拦截，fstatat 在 VFS 查找阶段
+    // 如果文件真的不存在，会优先返回 ENOENT (2)
+    // 如果文件存在但由于父目录无权限进入，会返回 EACCES (13)
+    if (err_adb == 13) {
+        if (err_modules == 13 || err_ksu == 13) {
             LOGD("判定结果: [不洁] - 发现隐藏的子目录索引。");
-        } else if (err_modules == ENOENT) {
-            LOGD("判定结果: [干净] - /data/adb 为系统原生空目录。");
+        } else if (err_modules == 2) {
+            LOGD("判定结果: [干净] - 路径探测确认内部无 modules。");
         }
-    } else if (err_adb == ENOENT) {
-        LOGD("判定结果: [干净] - 连 /data/adb 都不存在。");
     } else {
-        LOGD("判定结果: [未知] - 受到更高级别的挂载或 SELinux 屏蔽。");
+        LOGD("判定结果: [环境异常] - 可能是由于 Namespace 隔离导致无法触达 /data/adb");
     }
     LOGD("--- 环境分析结束 ---");
 }

@@ -1,3 +1,4 @@
+~~~
 #include <jni.h>
 #include <time.h>
 #include <android/log.h>
@@ -30,10 +31,10 @@ void run_cold_hot_analysis(JNIEnv *env, jobject pm_obj, jmethodID mid, const cha
     }
 
     long hot_avg = hot_total / (TEST_COUNT - 1);
-    float ratio = (float)cold_time / (hot_avg > 0 ? hot_avg : 1);
+    float ratio = (float)cold_time / hot_avg;
 
-    __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG,
-        "目标: %-25s | Cold: %6ld | HotAvg: %6ld | Ratio: %.2f",
+    __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, 
+        "目标: %-25s | Cold: %6ld | HotAvg: %6ld | Ratio: %.2f", 
         pkg_name, cold_time, hot_avg, ratio);
 
     (*env)->DeleteLocalRef(env, j_pkg);
@@ -41,16 +42,13 @@ void run_cold_hot_analysis(JNIEnv *env, jobject pm_obj, jmethodID mid, const cha
 
 JNIEXPORT void JNICALL
 Java_com_example_baseapp_MainActivity_testColdHot(JNIEnv *env, jobject thiz) {
-    jclass context_cls = (*env)->GetObjectClass(env, thiz);
-    jmethodID get_pm_mid = (*env)->GetMethodID(env, context_cls, "getPackageManager", "()Landroid/content/pm/PackageManager;");
-    jobject pm_obj = (*env)->CallObjectMethod(env, thiz, get_pm_mid);
-    if (!pm_obj) return;
-    jclass pm_cls = (*env)->GetObjectClass(env, pm_obj);
-    jmethodID get_info_mid = (*env)->GetMethodID(env, pm_cls, "getPackageInfo", "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;");
-
+    // ... 获取 PackageManager 逻辑同前 ...
+    
     __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, "========== 冷热启动差异分析 ==========");
     run_cold_hot_analysis(env, pm_obj, get_info_mid, "com.android.settings");
     run_cold_hot_analysis(env, pm_obj, get_info_mid, "com.random.fake.pkg.666");
     run_cold_hot_analysis(env, pm_obj, get_info_mid, "com.topjohnwu.magisk");
     __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, "====================================");
 }
+
+~~~

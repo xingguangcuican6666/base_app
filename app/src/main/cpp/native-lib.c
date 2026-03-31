@@ -10,9 +10,11 @@
 #define LOG_TAG "KSU_DETECTOR"
 #define ITERATIONS 1000
 
-// 兼容性修复：如果 SYS_fstatat 没定义，尝试使用 __NR_fstatat64 (ARM64 常用)
+// 兼容性修复：如果 SYS_fstatat 没定义，尝试各架构对应的系统调用号
 #if !defined(SYS_fstatat)
-  #if defined(__NR_fstatat64)
+  #if defined(__NR_newfstatat)
+    #define SYS_fstatat __NR_newfstatat  // x86_64 使用 newfstatat (262)
+  #elif defined(__NR_fstatat64)
     #define SYS_fstatat __NR_fstatat64
   #elif defined(__aarch64__)
     #define SYS_fstatat 79  // ARM64 架构下 fstatat 的原始系统调用号
